@@ -1,0 +1,38 @@
+# 本地文档(协议解析等,不随仓库发布)
+doc/
+
+# 构建产物
+bin/
+build/
+cmake-build-*/
+out/
+dist/
+*.o
+*.obj
+*.exe
+*.dll
+*.dll.a
+*.lib
+*.pdb
+*.ilk
+*.res
+
+# IDE / 工具
+.idea/
+.vs/
+.vscode/
+*.user
+*.suo
+
+# 系统
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# 本地临时文件
+_*.ps1
+_*.png
+_*.log
+
+# 依赖目录
+node_modules/
