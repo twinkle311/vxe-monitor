@@ -12,6 +12,8 @@
 #define WIN32_LEAN_AND_MEAN
 
 #include "vxe_hid.h"
+#include <objidl.h>
+#include <gdiplus.h>
 #include <shellapi.h>
 #include <strsafe.h>
 #include <stdint.h>
@@ -34,12 +36,26 @@
 #define IDM_RECONNECT 2007
 #define IDM_EXIT      2008
 #define IDM_VERSION   2009
+#define IDM_POLL_BASE 2010
+
+struct PollOption { UINT id; DWORD ms; const WCHAR* label; };
+static const PollOption kPollOptions[] = {
+    { IDM_POLL_BASE + 0, 15000, L"15 秒" },
+    { IDM_POLL_BASE + 1, 30000, L"30 秒" },
+    { IDM_POLL_BASE + 2, 60000, L"1 分钟" },
+    { IDM_POLL_BASE + 3, 3 * 60000, L"3 分钟" },
+    { IDM_POLL_BASE + 4, 5 * 60000, L"5 分钟" },
+    { IDM_POLL_BASE + 5, 10 * 60000, L"10 分钟" },
+    { IDM_POLL_BASE + 6, 15 * 60000, L"15 分钟" },
+    { IDM_POLL_BASE + 7, 30 * 60000, L"30 分钟" },
+    { IDM_POLL_BASE + 8, 60 * 60000, L"1 小时" },
+};
+#define IDM_ATKHUB 2019
 
 #define TIMER_OSD_HIDE 3001
 #define TIMER_OSD_FADE 3002
 
 #define OSD_KEY_COLOR RGB(255, 0, 255)
-#define POLL_INTERVAL_MS 30000
 
 static HINSTANCE g_hInstance = NULL;
 static HWND g_hMainWnd = NULL;
@@ -47,6 +63,7 @@ static HWND g_hOsdWnd = NULL;
 static NOTIFYICONDATAW g_nid = {0};
 static HANDLE g_hHidThread = NULL;
 static HANDLE g_hStopEvent = NULL;
+static HANDLE g_hWakeEvent = NULL; // 改轮询间隔/立即刷新时唤醒轮询等待
 
 // 共享状态(HID 线程写,UI 线程读;字符串由 g_cs 保护)
 static volatile LONG g_battery = -1;   // -1 = 未知
@@ -54,15 +71,17 @@ static volatile LONG g_charging = 0;
 static volatile LONG g_voltage = 0;    // mV
 static volatile LONG g_connectType = -1;
 static volatile LONG g_online = 0;
+static volatile LONG g_receiverPresent = 0; // 接收器/命令通道在场(鼠标可能未应答)
 static volatile bool g_deviceConnected = false;
 static WCHAR g_model[64] = L"VXE 无线鼠标";
 static char g_version[16] = "";
 static CRITICAL_SECTION g_cs;
 
 static UINT g_uTaskbarRestartMsg = 0;
+static volatile LONG g_pollMs = 30000; // 电量轮询间隔,注册表记忆,命令行可覆盖
 static const WCHAR* RUN_KEY = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 static const WCHAR* APP_NAME = L"vxe-monitor";
-static const WCHAR* APP_VERSION = L"V1.0.0";
+static const WCHAR* APP_VERSION = L"V1.0.1";
 
 static void UpdateTrayTooltip();
 static void UpdateTrayIcon();
@@ -97,11 +116,7 @@ static const uint16_t FONT_5X9[10][9] = {
 static const uint8_t FONT_4X9_0[9] = {
     0x06, 0x09, 0x09, 0x09, 0x09, 0x09, 0x09, 0x09, 0x06
 };
-// 闪电 (充电标志):大号 5x9 / 小号 3x5
-static const uint16_t BOLT_5X9[9] = {
-    0x01, 0x03, 0x07, 0x0E, 0x06, 0x04, 0x02, 0x02, 0x01
-};
-static const uint8_t BOLT_3X5[5] = { 0x1, 0x3, 0x2, 0x6, 0x4 };
+// 闪电改用多边形绘制(DrawBoltHorizontal),不再使用点阵字模
 // 破折号(未知电量 "--" 用单个宽横杠):5x9 / 3x5
 static const uint16_t DASH_5X9[9] = { 0, 0, 0, 0, 0x1F, 0, 0, 0, 0 };
 static const uint8_t DASH_3X5[5] = { 0, 0, 0x07, 0, 0 };
@@ -137,19 +152,6 @@ static Glyph MakeOneBar(bool small) { // "100" 里的 1(实心窄条)
     memset(&g, 0, sizeof(g));
     if (small) { g.fw = 2; g.fh = 5; for (int r = 0; r < 5; ++r) g.rows[r] = 0x3; }
     else       { g.fw = 2; g.fh = 9; for (int r = 0; r < 9; ++r) g.rows[r] = 0x3; }
-    return g;
-}
-
-static Glyph MakeBolt(bool small) {
-    Glyph g;
-    memset(&g, 0, sizeof(g));
-    if (small) {
-        g.fw = 3; g.fh = 5;
-        for (int r = 0; r < 5; ++r) g.rows[r] = BOLT_3X5[r];
-    } else {
-        g.fw = 5; g.fh = 9;
-        for (int r = 0; r < 9; ++r) g.rows[r] = BOLT_5X9[r];
-    }
     return g;
 }
 
@@ -201,8 +203,57 @@ static bool IsSystemDarkTheme() {
     return true;
 }
 
-static HICON CreateBatteryIcon(int battery, bool charging) {
-    int size = GetTrayIconSize(g_hMainWnd);
+// 多边形填充(扫描线),用于闪电图标
+static void FillPolygon(uint32_t* px, int W, const int* xs, const int* ys, int n, uint32_t col) {
+    int minY = ys[0], maxY = ys[0];
+    for (int i = 1; i < n; ++i) {
+        if (ys[i] < minY) minY = ys[i];
+        if (ys[i] > maxY) maxY = ys[i];
+    }
+    for (int y = minY; y <= maxY; ++y) {
+        int xints[16], ni = 0;
+        for (int i = 0; i < n; ++i) {
+            int y1 = ys[i], y2 = ys[(i + 1) % n];
+            if ((y1 <= y && y2 > y) || (y2 <= y && y1 > y)) {
+                xints[ni++] = xs[i] + (int)((long long)(xs[(i + 1) % n] - xs[i]) * (y - y1) / (y2 - y1));
+            }
+        }
+        for (int a = 1; a < ni; ++a) {
+            int key = xints[a], b = a - 1;
+            while (b >= 0 && xints[b] > key) { xints[b + 1] = xints[b]; --b; }
+            xints[b + 1] = key;
+        }
+        for (int k = 0; k + 1 < ni; k += 2) {
+            for (int x = xints[k]; x <= xints[k + 1]; ++x) {
+                if (x >= 0 && x < W && y >= 0 && y < W) px[y * W + x] = col;
+            }
+        }
+    }
+}
+
+// 横向闪电(经典单笔画 zap 轮廓旋转加宽,钝头防小尺寸丢画),按腔体自适应并居中,轮廓完整不裁切
+static void DrawBoltHorizontal(uint32_t* px, int W, int x0, int y0, int bw, int bh, uint32_t col) {
+    // 归一化顶点(×1300 ×1000,连通单带):左钝头 → 下刃 → 内折 → 右钝头 → 上刃 → 内折
+    static const int VX[8] = {542, 60, 60, 758, 758, 1240, 1240, 542};
+    static const int VY[8] = {500, 400, 560, 875, 500, 630, 450, 125};
+    float drawW = (float)(bw * 98 / 100);
+    float drawH = drawW / 1.3f;
+    if (drawH > bh * 98 / 100) {
+        drawH = (float)(bh * 98 / 100);
+        drawW = drawH * 1.3f;
+    }
+    float ox = x0 + (bw - drawW) / 2.0f;
+    float oy = y0 + (bh - drawH) / 2.0f;
+    int xs[8], ys[8];
+    for (int i = 0; i < 8; ++i) {
+        xs[i] = (int)(ox + VX[i] * drawW / 1300.0f + 0.5f);
+        ys[i] = (int)(oy + VY[i] * drawH / 1000.0f + 0.5f);
+    }
+    FillPolygon(px, W, xs, ys, 8, col);
+}
+
+static HICON CreateBatteryIcon(int battery, bool charging, int forcedSize = 0) {
+    int size = forcedSize > 0 ? forcedSize : GetTrayIconSize(g_hMainWnd);
     if (size <= 0) size = 16;
     const int SS = 4;
     const int W = size * SS;
@@ -281,30 +332,30 @@ static HICON CreateBatteryIcon(int battery, bool charging) {
     int in_w = in_x1 - in_x0 + 1;
     int in_h = (body_y1 - frame_t) - in_y0 + 1;
 
-    // ---- 构造字形序列:[数字][窄0 x2](或 [--])[闪电?] ----
-    Glyph glyphs[5];
-    int ng = 0;
-    bool small = (size < 20);
-    if (unknown) {
-        glyphs[ng++] = MakeDash(small);
-    } else if (battery == 100) {
-        glyphs[ng++] = MakeOneBar(small);
-        glyphs[ng++] = MakeZeroNarrow();
-        glyphs[ng++] = MakeZeroNarrow();
+    if (charging) {
+        // 充电:腔体内画横向闪电(多边形填充,任何尺寸下都完整清晰)
+        DrawBoltHorizontal(hi, W, in_x0, in_y0, in_w, in_h, c_digit);
     } else {
-        char s[8];
-        snprintf(s, sizeof(s), "%d", battery);
-        for (int i = 0; s[i]; ++i) glyphs[ng++] = MakeDigit(s[i] - '0', small);
-    }
-    if (charging) glyphs[ng++] = MakeBolt(small);
+        // 放电/未知:字形序列 [数字][窄0 x2] / [--]
+        Glyph glyphs[5];
+        int ng = 0;
+        bool small = (size < 20);
+        if (unknown) {
+            glyphs[ng++] = MakeDash(small);
+        } else if (battery == 100) {
+            glyphs[ng++] = MakeOneBar(small);
+            glyphs[ng++] = MakeZeroNarrow();
+            glyphs[ng++] = MakeZeroNarrow();
+        } else {
+            char s[8];
+            snprintf(s, sizeof(s), "%d", battery);
+            for (int i = 0; s[i]; ++i) glyphs[ng++] = MakeDigit(s[i] - '0', small);
+        }
 
-    int gap_fp = (ng > 1) ? 1 : 0;
-    int scale = 1;
-    int bold_w = 1;
-    {
+        int gap_fp = (ng > 1) ? 1 : 0;
+        int bold_w = 1;
         int fh = small ? 5 : 9;
-        int target_h = in_h * 70 / 100;
-        scale = target_h / fh;
+        int scale = in_h * 70 / 100 / fh;
         if (scale < 1) scale = 1;
         auto TextW = [&](int sc) {
             int w = 0;
@@ -409,9 +460,22 @@ static void UpdateTrayTooltip() {
                          (int)g_battery,
                          vxe::ConnectTypeName((int)g_connectType),
                          (int)g_voltage);
-    } else {
+    } else if (g_battery >= 0) {
+        // 鼠标休眠/关机:保留最后已知状态并标注离线
         StringCchPrintfW(g_nid.szTip, ARRAYSIZE(g_nid.szTip),
-                         L"vxe-monitor\n(等待设备连接...)");
+                         L"%s\n电量: %s%d%% (已离线,最后已知)\n%s · %dmV",
+                         g_model,
+                         g_charging ? L"⚡" : L"",
+                         (int)g_battery,
+                         vxe::ConnectTypeName((int)g_connectType),
+                         (int)g_voltage);
+    } else {
+        if (g_receiverPresent)
+            StringCchPrintfW(g_nid.szTip, ARRAYSIZE(g_nid.szTip),
+                             L"vxe-monitor\n接收器已连接\n鼠标未应答(可能休眠/关机)");
+        else
+            StringCchPrintfW(g_nid.szTip, ARRAYSIZE(g_nid.szTip),
+                             L"vxe-monitor\n(等待设备连接...)");
     }
     LeaveCriticalSection(&g_cs);
 }
@@ -524,9 +588,21 @@ static void ShowOsdNotification() {
         StringCchPrintfW(g_osdTextLine2, ARRAYSIZE(g_osdTextLine2),
                          L"%s  |  %s  |  %dmV", g_model,
                          vxe::ConnectTypeName((int)g_connectType), (int)g_voltage);
+    } else if (g_battery >= 0) {
+        StringCchPrintfW(g_osdTextLine1, ARRAYSIZE(g_osdTextLine1),
+                         L"电量 %d%%%s  (已离线)", (int)g_battery,
+                         g_charging ? L"  ⚡充电中" : L"");
+        StringCchPrintfW(g_osdTextLine2, ARRAYSIZE(g_osdTextLine2),
+                         L"%s  |  最后已知  |  %dmV", g_model, (int)g_voltage);
     } else {
-        StringCchPrintfW(g_osdTextLine1, ARRAYSIZE(g_osdTextLine1), L"未连接");
-        StringCchPrintfW(g_osdTextLine2, ARRAYSIZE(g_osdTextLine2), L"等待鼠标 / 接收器...");
+        if (g_receiverPresent) {
+            StringCchPrintfW(g_osdTextLine1, ARRAYSIZE(g_osdTextLine1), L"接收器已连接");
+            StringCchPrintfW(g_osdTextLine2, ARRAYSIZE(g_osdTextLine2),
+                             L"鼠标未应答 · 可能休眠 / 关机");
+        } else {
+            StringCchPrintfW(g_osdTextLine1, ARRAYSIZE(g_osdTextLine1), L"未连接");
+            StringCchPrintfW(g_osdTextLine2, ARRAYSIZE(g_osdTextLine2), L"等待鼠标 / 接收器...");
+        }
     }
     LeaveCriticalSection(&g_cs);
 
@@ -577,66 +653,86 @@ static void SetModelName(BYTE cid, BYTE mid, const WCHAR* product) {
 
 static DWORD WINAPI HidWorkerThread(LPVOID) {
     static vxe::HidEntry list[128];
+    static int cand[8];
+    WCHAR lastGoodPath[MAX_PATH] = L"";
 
     while (WaitForSingleObject(g_hStopEvent, 200) == WAIT_TIMEOUT) {
         int n = vxe::EnumDevices(list, 128);
-        int idx = vxe::FindCompxDevice(list, n);
-        if (idx < 0) {
+        int nc = vxe::FindCompxDevices(list, n, cand, 8);
+        if (nc == 0) {
+            InterlockedExchange(&g_receiverPresent, 0);
             if (g_deviceConnected) {
                 g_deviceConnected = false;
-                InterlockedExchange(&g_battery, -1);
                 PostMessageW(g_hMainWnd, WM_APP_BAT_UPDATE, 0, 0);
             }
             Sleep(1500);
             continue;
         }
-
-        vxe::Transport t;
-        if (!vxe::OpenTransport(list[idx], &t)) {
-            Sleep(1500);
-            continue;
+        // 上次成功过的通道排到最前
+        if (lastGoodPath[0]) {
+            for (int i = 0; i < nc; ++i) {
+                if (wcscmp(list[cand[i]].path, lastGoodPath) == 0) {
+                    int tmp = cand[0];
+                    cand[0] = cand[i];
+                    cand[i] = tmp;
+                    break;
+                }
+            }
         }
 
-        // 连接建立后查询一次型号 / 连接方式 / 固件版本
-        BYTE cid = 0, mid = 0;
-        int ct = vxe::QueryConnectType(t, &cid, &mid);
-        BYTE cid2 = 0, mid2 = 0;
-        if (vxe::QueryCidMid(t, &cid2, &mid2, nullptr)) {
-            cid = cid2;
-            mid = mid2;
-        }
-        SetModelName(cid, mid, list[idx].product);
-        vxe::QueryVersion(t, g_version, sizeof(g_version));
-        InterlockedExchange(&g_connectType, ct >= 0 ? ct : -1);
-        g_deviceConnected = true;
-        PostMessageW(g_hMainWnd, WM_APP_BAT_UPDATE, 0, 0);
+        // 逐个候选通道尝试:谁答出电量就用谁(接收器在鼠标有线模式下会失效,
+        // 由直连通道接管;反之亦然)。单次查询失败即切下一候选。
+        bool openedAny = false;
+        for (int ci = 0; ci < nc && WaitForSingleObject(g_hStopEvent, 0) == WAIT_TIMEOUT; ++ci) {
+            const vxe::HidEntry& e = list[cand[ci]];
+            vxe::Transport t;
+            if (!vxe::OpenTransport(e, &t)) continue;
+            openedAny = true;
 
-        int failCount = 0;
-        while (WaitForSingleObject(g_hStopEvent, 0) == WAIT_TIMEOUT) {
-            bool online = vxe::QueryOnline(t);
-            vxe::BatteryInfo b;
-            bool hasBatt = vxe::QueryBattery(t, &b);
+            bool identified = false;
+            while (WaitForSingleObject(g_hStopEvent, 0) == WAIT_TIMEOUT) {
+                // cmd3 由接收器本地应答(毫秒级),作为鼠标是否醒着的门控:
+                // 休眠/关机时跳过必然超时的电量查询,让离线重扫保持快节奏,
+                // 便于及时捕捉鼠标被唤醒的窗口
+                if (!vxe::QueryOnline(t)) break;
+                vxe::BatteryInfo b;
+                if (!vxe::QueryBattery(t, &b)) break;
 
-            if (hasBatt) {
-                failCount = 0;
+                if (!identified) {
+                    identified = true;
+                    StringCchCopyW(lastGoodPath, MAX_PATH, e.path);
+                    BYTE cid = 0, mid = 0, cid2 = 0, mid2 = 0;
+                    int ct = vxe::QueryConnectType(t, &cid, &mid);
+                    if (vxe::QueryCidMid(t, &cid2, &mid2, nullptr)) {
+                        cid = cid2;
+                        mid = mid2;
+                    }
+                    SetModelName(cid, mid, e.product);
+                    vxe::QueryVersion(t, g_version, sizeof(g_version));
+                    InterlockedExchange(&g_connectType, ct >= 0 ? ct : -1);
+                }
                 InterlockedExchange(&g_battery, b.level);
                 InterlockedExchange(&g_charging, b.charging ? 1 : 0);
                 InterlockedExchange(&g_voltage, b.voltageMv);
-                InterlockedExchange(&g_online, online ? 1 : 0);
-                if (!g_deviceConnected) g_deviceConnected = true;
+                g_deviceConnected = true;
                 PostMessageW(g_hMainWnd, WM_APP_BAT_UPDATE, 0, 0);
-            } else {
-                ++failCount;
-                if (failCount >= 3) break; // 设备可能已拔出,回到扫描
-            }
 
-            if (WaitForSingleObject(g_hStopEvent, POLL_INTERVAL_MS) != WAIT_TIMEOUT) break;
+                HANDLE waits[2] = { g_hStopEvent, g_hWakeEvent };
+                DWORD wr = WaitForMultipleObjects(2, waits, FALSE, (DWORD)g_pollMs);
+                if (wr == WAIT_OBJECT_0) break; // 退出信号
+                // 超时或"改间隔/立即刷新"唤醒 → 立即进入下一轮查询
+            }
+            t.Close();
         }
 
-        t.Close();
-        g_deviceConnected = false;
-        InterlockedExchange(&g_battery, -1);
-        PostMessageW(g_hMainWnd, WM_APP_BAT_UPDATE, 0, 0);
+        // 所有候选都取不到电量 = 鼠标不可达(休眠/关机/拔出):
+        // 保留最后已知的电量与充电状态,仅标记离线
+        InterlockedExchange(&g_receiverPresent, openedAny ? 1 : 0);
+        if (g_deviceConnected) {
+            g_deviceConnected = false;
+            PostMessageW(g_hMainWnd, WM_APP_BAT_UPDATE, 0, 0);
+        }
+        Sleep(800);
     }
     return 0;
 }
@@ -670,6 +766,25 @@ static void SetAutoRun(bool enable) {
     }
 }
 
+// 刷新间隔:注册表记忆(HKCU\Software\vxe-monitor\PollMs)
+static void LoadPollMs() {
+    DWORD v = 0, size = sizeof(v);
+    if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\vxe-monitor", L"PollMs",
+                     RRF_RT_REG_DWORD, NULL, &v, &size) == ERROR_SUCCESS &&
+        v >= 5000 && v <= 3600000) {
+        g_pollMs = (LONG)v;
+    }
+}
+
+static void SavePollMs(DWORD ms) {
+    HKEY hKey;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\vxe-monitor", 0, NULL, 0,
+                        KEY_SET_VALUE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
+        RegSetValueExW(hKey, L"PollMs", 0, REG_DWORD, (const BYTE*)&ms, sizeof(ms));
+        RegCloseKey(hKey);
+    }
+}
+
 static void ShowContextMenu(HWND hWnd) {
     POINT pt;
     GetCursorPos(&pt);
@@ -677,18 +792,21 @@ static void ShowContextMenu(HWND hWnd) {
     WCHAR bufHeader[80], bufBat[64], bufSt[64], bufV[64], bufC[64], bufVer[64];
 
     EnterCriticalSection(&g_cs);
-    if (g_deviceConnected) {
-        StringCchPrintfW(bufHeader, 80, L"%s", g_model);
-        if (g_battery >= 0)
-            StringCchPrintfW(bufBat, 64, L"电池电量: %d%%", (int)g_battery);
+    if (g_battery >= 0) {
+        if (g_deviceConnected)
+            StringCchPrintfW(bufHeader, 80, L"%s", g_model);
         else
-            StringCchPrintfW(bufBat, 64, L"电池电量: --");
+            StringCchPrintfW(bufHeader, 80, L"%s (已离线)", g_model);
+        StringCchPrintfW(bufBat, 64, L"电池电量: %d%%%s", (int)g_battery,
+                         g_deviceConnected ? L"" : L" (最后已知)");
         StringCchPrintfW(bufSt, 64, L"状态: %s", g_charging ? L"充电中" : L"放电中");
         StringCchPrintfW(bufV, 64, L"电压: %d mV", (int)g_voltage);
         StringCchPrintfW(bufC, 64, L"连接: %s", vxe::ConnectTypeName((int)g_connectType));
         StringCchPrintfW(bufVer, 64, L"固件: %S", g_version[0] ? g_version : "--");
     } else {
-        StringCchPrintfW(bufHeader, 80, L"vxe-monitor (未连接)");
+        StringCchPrintfW(bufHeader, 80, L"%s",
+                         g_receiverPresent ? L"接收器已连接 (鼠标未应答)"
+                                           : L"vxe-monitor (未连接)");
         StringCchPrintfW(bufBat, 64, L"电池电量: --");
         StringCchPrintfW(bufSt, 64, L"状态: --");
         StringCchPrintfW(bufV, 64, L"电压: --");
@@ -710,7 +828,14 @@ static void ShowContextMenu(HWND hWnd) {
     AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
     UINT autoRunFlags = MF_STRING | (IsAutoRunEnabled() ? MF_CHECKED : MF_UNCHECKED);
     AppendMenuW(hMenu, autoRunFlags, IDM_AUTORUN, L"开机自启动");
+    HMENU hPoll = CreatePopupMenu();
+    for (int i = 0; i < (int)(sizeof(kPollOptions) / sizeof(kPollOptions[0])); ++i) {
+        UINT flags = MF_STRING | (((DWORD)g_pollMs == kPollOptions[i].ms) ? MF_CHECKED : MF_UNCHECKED);
+        AppendMenuW(hPoll, flags, kPollOptions[i].id, kPollOptions[i].label);
+    }
+    AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hPoll, L"刷新间隔");
     AppendMenuW(hMenu, MF_STRING, IDM_RECONNECT, L"立即刷新 / 重新连接");
+    AppendMenuW(hMenu, MF_STRING, IDM_ATKHUB, L"atk-hub");
     AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(hMenu, MF_STRING, IDM_EXIT, L"退出");
 
@@ -748,6 +873,20 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
                 case IDM_EXIT:
                     DestroyWindow(hWnd);
                     break;
+                case IDM_ATKHUB:
+                    ShellExecuteW(NULL, L"open", L"https://v3-hub.atkgear.com/", NULL, NULL,
+                                  SW_SHOWNORMAL);
+                    break;
+                default: {
+                    int idx = LOWORD(wParam) - IDM_POLL_BASE;
+                    if (idx >= 0 && idx < (int)(sizeof(kPollOptions) / sizeof(kPollOptions[0]))) {
+                        DWORD ms = kPollOptions[idx].ms;
+                        SavePollMs(ms);
+                        InterlockedExchange(&g_pollMs, (LONG)ms);
+                        if (g_hWakeEvent) SetEvent(g_hWakeEvent); // 立即按新间隔生效并马上刷新
+                    }
+                    break;
+                }
             }
             return 0;
         case WM_APP_BAT_UPDATE:
@@ -765,7 +904,81 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
     }
 }
 
-int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
+// ---- 开发自测:把各状态托盘图标渲染成 PNG,便于校验像素效果 ----
+static void SaveIconPreview() {
+    Gdiplus::GdiplusStartupInput gsi;
+    ULONG_PTR token = 0;
+    Gdiplus::GdiplusStartup(&token, &gsi, nullptr);
+
+    struct State { int bat; bool chg; };
+    const State states[] = {
+        {95, true}, {95, false}, {40, false}, {5, false}, {100, false}, {-1, false},
+    };
+    const int sizes[] = {16, 24, 32};
+    const int cell = 48, gap = 6;
+    const int cols = (int)(sizeof(states) / sizeof(states[0]));
+    const int rows = (int)(sizeof(sizes) / sizeof(sizes[0]));
+    int cw = cols * (cell + gap) + gap;
+    int ch = rows * (cell + gap) + gap;
+
+    HDC hdc = GetDC(NULL);
+    HDC mem = CreateCompatibleDC(hdc);
+    BITMAPINFO bmi = {0};
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = cw;
+    bmi.bmiHeader.biHeight = -ch;
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    void* bits = nullptr;
+    HBITMAP hbm = CreateDIBSection(mem, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    HGDIOBJ old = SelectObject(mem, hbm);
+    RECT rc = {0, 0, cw, ch};
+    HBRUSH br = CreateSolidBrush(RGB(255, 255, 255));
+    FillRect(mem, &rc, br);
+    DeleteObject(br);
+
+    for (int r = 0; r < rows; ++r) {
+        for (int c = 0; c < cols; ++c) {
+            HICON ic = CreateBatteryIcon(states[c].bat, states[c].chg, sizes[r]);
+            int x = gap + c * (cell + gap) + (cell - sizes[r]) / 2;
+            int y = gap + r * (cell + gap) + (cell - sizes[r]) / 2;
+            DrawIconEx(mem, x, y, ic, sizes[r], sizes[r], 0, nullptr, DI_NORMAL);
+            DestroyIcon(ic);
+        }
+    }
+
+    WCHAR path[MAX_PATH];
+    GetModuleFileNameW(nullptr, path, MAX_PATH);
+    WCHAR* slash = wcsrchr(path, L'\\');
+    if (slash) StringCchCopyW(slash + 1, MAX_PATH - (slash + 1 - path), L"_icon_preview.png");
+
+    {
+        Gdiplus::Bitmap* bmp = Gdiplus::Bitmap::FromHBITMAP(hbm, nullptr);
+        static const CLSID kPng = {0x557cf406, 0x1a04, 0x11d3,
+                                   {0x9a, 0x73, 0x00, 0x00, 0xf8, 0x1e, 0xf3, 0x2e}};
+        bmp->Save(path, &kPng, nullptr);
+        delete bmp;
+    }
+
+    SelectObject(mem, old);
+    DeleteObject(hbm);
+    DeleteDC(mem);
+    ReleaseDC(NULL, hdc);
+    Gdiplus::GdiplusShutdown(token);
+}
+
+int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int) {
+    // 开发自测:渲染图标预览图后退出
+    if (pCmdLine && wcsstr(pCmdLine, L"--dump-icon")) {
+        SaveIconPreview();
+        return 0;
+    }
+    LoadPollMs(); // 注册表记忆的刷新间隔
+    // 命令行参数覆盖:轮询间隔秒数(5~3600),如 vxe-monitor.exe 30
+    if (pCmdLine && *pCmdLine) {
+        int sec = (int)wcstol(pCmdLine, nullptr, 10);
+        if (sec >= 5 && sec <= 3600) g_pollMs = sec * 1000;
+    }
     HANDLE hMutex = CreateMutexW(NULL, TRUE, L"Local\\vxe-monitorSingleInstance");
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         CloseHandle(hMutex);
@@ -815,6 +1028,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
     Shell_NotifyIconW(NIM_ADD, &g_nid);
 
     g_hStopEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+    g_hWakeEvent = CreateEventW(NULL, FALSE, FALSE, NULL); // 自动复位
     g_hHidThread = CreateThread(NULL, 0, HidWorkerThread, NULL, 0, NULL);
 
     MSG msg;
@@ -827,6 +1041,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
     WaitForSingleObject(g_hHidThread, 2000);
     CloseHandle(g_hHidThread);
     CloseHandle(g_hStopEvent);
+    CloseHandle(g_hWakeEvent);
     if (g_nid.hIcon) DestroyIcon(g_nid.hIcon);
     if (g_hOsdWnd) DestroyWindow(g_hOsdWnd);
     DeleteCriticalSection(&g_cs);

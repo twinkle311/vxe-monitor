@@ -11,7 +11,7 @@ echo ========================================================
 where g++ >nul 2>nul
 if %ERRORLEVEL% equ 0 (
     echo [Toolchain] Using MinGW GCC/G++ ...
-    g++ -O3 -mwindows -municode -s -static -std=c++17 src\main.cpp -lsetupapi -lhid -luser32 -lgdi32 -lshell32 -ladvapi32 -o bin\vxe-monitor.exe
+    g++ -O3 -mwindows -municode -s -static -std=c++17 src\main.cpp -lsetupapi -lhid -luser32 -lgdi32 -lshell32 -ladvapi32 -lgdiplus -o bin\vxe-monitor.exe
     if errorlevel 1 goto fail
     g++ -O2 -mconsole -municode -s -static -std=c++17 tools\probe.cpp -lsetupapi -lhid -o bin\probe.exe
     if errorlevel 1 goto fail
@@ -21,7 +21,7 @@ if %ERRORLEVEL% equ 0 (
 where cl >nul 2>nul
 if %ERRORLEVEL% equ 0 (
     echo [Toolchain] Using MSVC CL ...
-    cl /nologo /O2 /MT /EHsc /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /std:c++17 src\main.cpp /Fe:bin\vxe-monitor.exe /link /SUBSYSTEM:WINDOWS setupapi.lib hid.lib user32.lib gdi32.lib shell32.lib advapi32.lib
+    cl /nologo /O2 /MT /EHsc /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /std:c++17 src\main.cpp /Fe:bin\vxe-monitor.exe /link /SUBSYSTEM:WINDOWS setupapi.lib hid.lib user32.lib gdi32.lib shell32.lib advapi32.lib gdiplus.lib
     if errorlevel 1 goto fail
     cl /nologo /O2 /MT /EHsc /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /std:c++17 tools\probe.cpp /Fe:bin\probe.exe /link /SUBSYSTEM:CONSOLE setupapi.lib hid.lib user32.lib
     if errorlevel 1 goto fail

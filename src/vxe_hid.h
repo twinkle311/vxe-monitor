@@ -208,23 +208,26 @@ inline bool IsCompxChannel(const HidEntry& e) {
     return IsVxeVid(e.vid) && e.outputLen >= 17 && e.inputLen >= 17;
 }
 
-// 选出 COMPX 命令通道;优先 in/out 长度匹配的集合,其次按 usagePage 推断。
-inline int FindCompxDevice(const HidEntry* list, int n) {
-    int bySize = -1, byPage = -1, fallback = -1;
-    for (int i = 0; i < n; ++i) {
-        const HidEntry& e = list[i];
-        if (IsCompxChannel(e)) { bySize = i; break; }
-        if (IsVxeVid(e.vid) && e.usage == COMPX_USAGE &&
-            (e.usagePage == 0xFF02 || e.usagePage == COMPX_USAGEPAGE) && byPage < 0) {
-            byPage = i;
+// 收集全部 COMPX 命令通道下标(接收器与有线直连可能同时在场)。
+// 排序:直连设备(产品名不含 "Dongle")优先——鼠标插 USB 时接收器的 RF 已离线,
+// 直连通道才是充电状态的实时来源。返回候选数量。
+inline int FindCompxDevices(const HidEntry* list, int n, int* outIdx, int maxOut) {
+    int count = 0;
+    for (int pass = 0; pass < 2 && count < maxOut; ++pass) {
+        for (int i = 0; i < n && count < maxOut; ++i) {
+            if (!IsCompxChannel(list[i])) continue;
+            bool isReceiver = (wcsstr(list[i].product, L"Dongle") != nullptr);
+            if ((pass == 0) == isReceiver) continue; // pass 0: 直连优先
+            outIdx[count++] = i;
         }
     }
-    if (bySize >= 0) return bySize;
-    if (byPage >= 0) return byPage;
-    for (int i = 0; i < n; ++i) {
-        if (list[i].isCompx && fallback < 0) fallback = i;
-    }
-    return fallback;
+    return count;
+}
+
+// 兼容旧接口:返回第一个候选(直连优先)。
+inline int FindCompxDevice(const HidEntry* list, int n) {
+    int idx[8];
+    return FindCompxDevices(list, n, idx, 8) > 0 ? idx[0] : -1;
 }
 
 // ---- 传输层 -------------------------------------------------------------
