@@ -57,13 +57,13 @@ static const PollOption kPollOptions[] = {
 
 #define OSD_KEY_COLOR RGB(255, 0, 255)
 
-static HINSTANCE g_hInstance = NULL;
-static HWND g_hMainWnd = NULL;
-static HWND g_hOsdWnd = NULL;
+static HINSTANCE g_hInstance = nullptr;
+static HWND g_hMainWnd = nullptr;
+static HWND g_hOsdWnd = nullptr;
 static NOTIFYICONDATAW g_nid = {0};
-static HANDLE g_hHidThread = NULL;
-static HANDLE g_hStopEvent = NULL;
-static HANDLE g_hWakeEvent = NULL; // 改轮询间隔/立即刷新时唤醒轮询等待
+static HANDLE g_hHidThread = nullptr;
+static HANDLE g_hStopEvent = nullptr;
+static HANDLE g_hWakeEvent = nullptr; // 改轮询间隔/立即刷新时唤醒轮询等待
 
 // 共享状态(HID 线程写,UI 线程读;字符串由 g_cs 保护)
 static volatile LONG g_battery = -1;   // -1 = 未知
@@ -196,7 +196,7 @@ static bool IsSystemDarkTheme() {
     DWORD val = 0, size = sizeof(val);
     if (RegGetValueW(HKEY_CURRENT_USER,
                      L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
-                     L"SystemUsesLightTheme", RRF_RT_REG_DWORD, NULL, &val,
+                     L"SystemUsesLightTheme", RRF_RT_REG_DWORD, nullptr, &val,
                      &size) == ERROR_SUCCESS) {
         return (val == 0);
     }
@@ -258,7 +258,7 @@ static HICON CreateBatteryIcon(int battery, bool charging, int forcedSize = 0) {
     const int SS = 4;
     const int W = size * SS;
 
-    HDC hdcScreen = GetDC(NULL);
+    HDC hdcScreen = GetDC(nullptr);
     HDC hdcMem = CreateCompatibleDC(hdcScreen);
 
     BITMAPINFO bmi = {0};
@@ -269,12 +269,12 @@ static HICON CreateBatteryIcon(int battery, bool charging, int forcedSize = 0) {
     bmi.bmiHeader.biBitCount = 32;
     bmi.bmiHeader.biCompression = BI_RGB;
 
-    void* pvBits = NULL;
-    HBITMAP hbmColor = CreateDIBSection(hdcMem, &bmi, DIB_RGB_COLORS, &pvBits, NULL, 0);
+    void* pvBits = nullptr;
+    HBITMAP hbmColor = CreateDIBSection(hdcMem, &bmi, DIB_RGB_COLORS, &pvBits, nullptr, 0);
     if (!hbmColor || !pvBits) {
         DeleteDC(hdcMem);
-        ReleaseDC(NULL, hdcScreen);
-        return NULL;
+        ReleaseDC(nullptr, hdcScreen);
+        return nullptr;
     }
     uint32_t* hi = (uint32_t*)pvBits;
     memset(hi, 0, W * W * sizeof(uint32_t));
@@ -389,13 +389,13 @@ static HICON CreateBatteryIcon(int battery, bool charging, int forcedSize = 0) {
     bomi.bmiHeader = bmi.bmiHeader;
     bomi.bmiHeader.biWidth = size;
     bomi.bmiHeader.biHeight = -size;
-    void* pvOut = NULL;
-    HBITMAP hbmOut = CreateDIBSection(hdcMem, &bomi, DIB_RGB_COLORS, &pvOut, NULL, 0);
+    void* pvOut = nullptr;
+    HBITMAP hbmOut = CreateDIBSection(hdcMem, &bomi, DIB_RGB_COLORS, &pvOut, nullptr, 0);
     if (!hbmOut || !pvOut) {
         DeleteObject(hbmColor);
         DeleteDC(hdcMem);
-        ReleaseDC(NULL, hdcScreen);
-        return NULL;
+        ReleaseDC(nullptr, hdcScreen);
+        return nullptr;
     }
     uint32_t* out = (uint32_t*)pvOut;
     const int SS2 = SS * SS;
@@ -444,7 +444,7 @@ static HICON CreateBatteryIcon(int battery, bool charging, int forcedSize = 0) {
     DeleteObject(hbmOut);
     DeleteObject(hbmMask);
     DeleteDC(hdcMem);
-    ReleaseDC(NULL, hdcScreen);
+    ReleaseDC(nullptr, hdcScreen);
     return hIcon;
 }
 
@@ -560,7 +560,7 @@ static LRESULT CALLBACK OsdWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lP
         case WM_TIMER: {
             if (wParam == TIMER_OSD_HIDE) {
                 KillTimer(hWnd, TIMER_OSD_HIDE);
-                SetTimer(hWnd, TIMER_OSD_FADE, 16, NULL);
+                SetTimer(hWnd, TIMER_OSD_FADE, 16, nullptr);
             } else if (wParam == TIMER_OSD_FADE) {
                 if (g_osdAlpha > 15) {
                     g_osdAlpha -= 15;
@@ -621,10 +621,10 @@ static void ShowOsdNotification() {
     g_osdAlpha = 240;
     SetLayeredWindowAttributes(g_hOsdWnd, OSD_KEY_COLOR, g_osdAlpha,
                                LWA_COLORKEY | LWA_ALPHA);
-    InvalidateRect(g_hOsdWnd, NULL, FALSE);
+    InvalidateRect(g_hOsdWnd, nullptr, FALSE);
     UpdateWindow(g_hOsdWnd);
     KillTimer(g_hOsdWnd, TIMER_OSD_FADE);
-    SetTimer(g_hOsdWnd, TIMER_OSD_HIDE, 1600, NULL);
+    SetTimer(g_hOsdWnd, TIMER_OSD_HIDE, 1600, nullptr);
 }
 
 // ---- HID 后台线程 (VXE COMPX 协议轮询) ------------------------------------
@@ -744,7 +744,7 @@ static bool IsAutoRunEnabled() {
     if (RegOpenKeyExW(HKEY_CURRENT_USER, RUN_KEY, 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
         WCHAR path[MAX_PATH];
         DWORD len = sizeof(path), type = 0;
-        LSTATUS st = RegQueryValueExW(hKey, APP_NAME, NULL, &type, (LPBYTE)path, &len);
+        LSTATUS st = RegQueryValueExW(hKey, APP_NAME, nullptr, &type, (LPBYTE)path, &len);
         RegCloseKey(hKey);
         return (st == ERROR_SUCCESS);
     }
@@ -756,7 +756,7 @@ static void SetAutoRun(bool enable) {
     if (RegOpenKeyExW(HKEY_CURRENT_USER, RUN_KEY, 0, KEY_SET_VALUE, &hKey) == ERROR_SUCCESS) {
         if (enable) {
             WCHAR selfPath[MAX_PATH];
-            GetModuleFileNameW(NULL, selfPath, MAX_PATH);
+            GetModuleFileNameW(nullptr, selfPath, MAX_PATH);
             RegSetValueExW(hKey, APP_NAME, 0, REG_SZ, (const BYTE*)selfPath,
                            (DWORD)((wcslen(selfPath) + 1) * sizeof(WCHAR)));
         } else {
@@ -770,7 +770,7 @@ static void SetAutoRun(bool enable) {
 static void LoadPollMs() {
     DWORD v = 0, size = sizeof(v);
     if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\vxe-monitor", L"PollMs",
-                     RRF_RT_REG_DWORD, NULL, &v, &size) == ERROR_SUCCESS &&
+                     RRF_RT_REG_DWORD, nullptr, &v, &size) == ERROR_SUCCESS &&
         v >= 5000 && v <= 3600000) {
         g_pollMs = (LONG)v;
     }
@@ -778,8 +778,8 @@ static void LoadPollMs() {
 
 static void SavePollMs(DWORD ms) {
     HKEY hKey;
-    if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\vxe-monitor", 0, NULL, 0,
-                        KEY_SET_VALUE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\vxe-monitor", 0, nullptr, 0,
+                        KEY_SET_VALUE, nullptr, &hKey, nullptr) == ERROR_SUCCESS) {
         RegSetValueExW(hKey, L"PollMs", 0, REG_DWORD, (const BYTE*)&ms, sizeof(ms));
         RegCloseKey(hKey);
     }
@@ -816,7 +816,7 @@ static void ShowContextMenu(HWND hWnd) {
     LeaveCriticalSection(&g_cs);
 
     AppendMenuW(hMenu, MF_STRING | MF_DISABLED, IDM_HEADER, bufHeader);
-    AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(hMenu, MF_STRING | MF_DISABLED, IDM_BATTERY, bufBat);
     AppendMenuW(hMenu, MF_STRING | MF_DISABLED, IDM_STATUS, bufSt);
     AppendMenuW(hMenu, MF_STRING | MF_DISABLED, IDM_VOLTAGE, bufV);
@@ -825,7 +825,7 @@ static void ShowContextMenu(HWND hWnd) {
     WCHAR bufAppVer[64];
     StringCchPrintfW(bufAppVer, 64, L"程序版本: %s", APP_VERSION);
     AppendMenuW(hMenu, MF_STRING | MF_DISABLED, IDM_VERSION, bufAppVer);
-    AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
     UINT autoRunFlags = MF_STRING | (IsAutoRunEnabled() ? MF_CHECKED : MF_UNCHECKED);
     AppendMenuW(hMenu, autoRunFlags, IDM_AUTORUN, L"开机自启动");
     HMENU hPoll = CreatePopupMenu();
@@ -836,11 +836,11 @@ static void ShowContextMenu(HWND hWnd) {
     AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hPoll, L"刷新间隔");
     AppendMenuW(hMenu, MF_STRING, IDM_RECONNECT, L"立即刷新 / 重新连接");
     AppendMenuW(hMenu, MF_STRING, IDM_ATKHUB, L"atk-hub");
-    AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(hMenu, MF_STRING, IDM_EXIT, L"退出");
 
     SetForegroundWindow(hWnd);
-    TrackPopupMenu(hMenu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hWnd, NULL);
+    TrackPopupMenu(hMenu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hWnd, nullptr);
     DestroyMenu(hMenu);
 }
 
@@ -867,14 +867,14 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
                     WaitForSingleObject(g_hHidThread, 3000);
                     CloseHandle(g_hHidThread);
                     ResetEvent(g_hStopEvent);
-                    g_hHidThread = CreateThread(NULL, 0, HidWorkerThread, NULL, 0, NULL);
+                    g_hHidThread = CreateThread(nullptr, 0, HidWorkerThread, nullptr, 0, nullptr);
                     break;
                 }
                 case IDM_EXIT:
                     DestroyWindow(hWnd);
                     break;
                 case IDM_ATKHUB:
-                    ShellExecuteW(NULL, L"open", L"https://v3-hub.atkgear.com/", NULL, NULL,
+                    ShellExecuteW(nullptr, L"open", L"https://v3-hub.atkgear.com/", nullptr, nullptr,
                                   SW_SHOWNORMAL);
                     break;
                 default: {
@@ -921,7 +921,7 @@ static void SaveIconPreview() {
     int cw = cols * (cell + gap) + gap;
     int ch = rows * (cell + gap) + gap;
 
-    HDC hdc = GetDC(NULL);
+    HDC hdc = GetDC(nullptr);
     HDC mem = CreateCompatibleDC(hdc);
     BITMAPINFO bmi = {0};
     bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
@@ -963,7 +963,7 @@ static void SaveIconPreview() {
     SelectObject(mem, old);
     DeleteObject(hbm);
     DeleteDC(mem);
-    ReleaseDC(NULL, hdc);
+    ReleaseDC(nullptr, hdc);
     Gdiplus::GdiplusShutdown(token);
 }
 
@@ -979,7 +979,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int) {
         int sec = (int)wcstol(pCmdLine, nullptr, 10);
         if (sec >= 5 && sec <= 3600) g_pollMs = sec * 1000;
     }
-    HANDLE hMutex = CreateMutexW(NULL, TRUE, L"Local\\vxe-monitorSingleInstance");
+    HANDLE hMutex = CreateMutexW(nullptr, TRUE, L"Local\\vxe-monitorSingleInstance");
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         CloseHandle(hMutex);
         return 0;
@@ -998,13 +998,13 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int) {
     wc.cbSize = sizeof(WNDCLASSEXW);
     wc.lpfnWndProc = MainWndProc;
     wc.hInstance = hInstance;
-    wc.hIcon = LoadIconW(NULL, IDI_APPLICATION);
+    wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
     wc.hIconSm = wc.hIcon;
     wc.lpszClassName = L"VxeTrayMessageWnd";
     RegisterClassExW(&wc);
 
     g_hMainWnd = CreateWindowExW(0, wc.lpszClassName, L"VxeMonitor", WS_POPUP, 0, 0, 0, 0,
-                                 NULL, NULL, hInstance, NULL);
+                                 nullptr, nullptr, hInstance, nullptr);
     g_uTaskbarRestartMsg = RegisterWindowMessageW(L"TaskbarCreated");
 
     WNDCLASSEXW wcOsd = {0};
@@ -1012,11 +1012,11 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int) {
     wcOsd.lpfnWndProc = OsdWndProc;
     wcOsd.hInstance = hInstance;
     wcOsd.lpszClassName = L"VxeOsdPopupWnd";
-    wcOsd.hCursor = LoadCursor(NULL, IDC_ARROW);
+    wcOsd.hCursor = LoadCursor(nullptr, IDC_ARROW);
     RegisterClassExW(&wcOsd);
     g_hOsdWnd = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
                                 wcOsd.lpszClassName, L"VxeOSD", WS_POPUP, 0, 0, 300, 76,
-                                NULL, NULL, hInstance, NULL);
+                                nullptr, nullptr, hInstance, nullptr);
 
     g_nid.cbSize = sizeof(NOTIFYICONDATAW);
     g_nid.hWnd = g_hMainWnd;
@@ -1027,12 +1027,12 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int) {
     UpdateTrayTooltip();
     Shell_NotifyIconW(NIM_ADD, &g_nid);
 
-    g_hStopEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
-    g_hWakeEvent = CreateEventW(NULL, FALSE, FALSE, NULL); // 自动复位
-    g_hHidThread = CreateThread(NULL, 0, HidWorkerThread, NULL, 0, NULL);
+    g_hStopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    g_hWakeEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr); // 自动复位
+    g_hHidThread = CreateThread(nullptr, 0, HidWorkerThread, nullptr, 0, nullptr);
 
     MSG msg;
-    while (GetMessageW(&msg, NULL, 0, 0)) {
+    while (GetMessageW(&msg, nullptr, 0, 0)) {
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
